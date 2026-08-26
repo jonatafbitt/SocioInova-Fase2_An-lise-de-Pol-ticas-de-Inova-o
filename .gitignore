@@ -9,5 +9,8 @@ __pycache__/
 backup_*.tse
 logs/
 
-# ChromaDB persistente (será reindexado)
+# ChromaDB persistente (local apenas - não versionar)
 data/vector_db/
+memoria_longo_prazo/chroma.sqlite3
+memoria_longo_prazo/**/*.bin
+memoria_longo_prazo/**/*.pickle
