@@ -1,0 +1,20 @@
+# --- Interface e Dashboards ---
+streamlit
+plotly
+
+# --- Dados e Processamento ---
+pandas
+pypdf
+fpdf2
+
+# --- Inteligência Artificial e RAG (LangChain + Ollama) ---
+ollama
+langchain
+langchain-ollama
+langchain-community
+chromadb
+
+# --- Integração com Google Drive (Opcional) ---
+google-api-python-client
+google-auth-httplib2
+google-auth-oauthlib

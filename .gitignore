@@ -1,0 +1,13 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyw
+
+# Backups e temporários
+*.zip
+backup_*.tse
+logs/
+
+# ChromaDB persistente (será reindexado)
+data/vector_db/
