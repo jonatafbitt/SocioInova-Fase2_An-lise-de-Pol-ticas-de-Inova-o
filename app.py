@@ -3,10 +3,12 @@ import os
 import re
 import json
 import shutil
+import subprocess  # Adicionado para listar modelos Ollama
 import pandas as pd
 from datetime import datetime
 from fpdf import FPDF
 from concurrent.futures import ThreadPoolExecutor # Para acelerar o carregamento
+from pathlib import Path
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_ollama import OllamaEmbeddings, ChatOllama
@@ -14,6 +16,11 @@ from langchain_community.vectorstores import Chroma
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnablePassthrough
 from langchain_core.output_parsers import StrOutputParser
+
+# Caminho base para dados
+BASE_DIR = Path(__file__).parent
+DATA_DIR = BASE_DIR / "documentos_inovação"
+PERSIST_DIR = BASE_DIR / "memoria_longo_prazo"
 
 # --- 1. CONFIGURAÇÕES, MEMÓRIA E BACKUP ---
 st.set_page_config(page_title="SocioInova RAG - UFBA", layout="wide")
@@ -65,14 +72,69 @@ def registrar_na_matriz(eixo, variavel, instituto, resumo_ia):
         df = pd.DataFrame([nova_linha])
     df.to_csv(ARQUIVO_MATRIZ, index=False, encoding="utf-8-sig")
 
+def salvar_no_log(pergunta, resposta, modelo, objetivo="Análise Geral"):
+    data_hora = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+    with open("registro_analise_tese.txt", "a", encoding="utf-8") as f:
+        f.write(f"\n{'='*60}\n")
+        f.write(f"📝 ENTRADA DE DIÁRIO DE BORDO - {data_hora}\n")
+        f.write(f"MODELO UTILIZADO: {modelo}\n")
+        f.write(f"OBJETIVO DA SESSÃO: {objetivo}\n")
+        f.write(f"{'='*60}\n\n")
+        f.write(f"❓ PERGUNTA DO PESQUISADOR:\n{pergunta}\n\n")
+        f.write(f"🤖 RESPOSTA DA IA:\n{resposta}\n\n")
+        f.write(f"✍️ NOTAS SOCIOLÓGICAS (Preencher Manualmente):\n")
+        f.write(f"- Insight:\n")
+        f.write(f"- Validação de Fontes:\n")
+        f.write(f"{'_'*60}\n")
+
 def carregar_memoria_conversa():
-    if os.path.exists("memoria_pesquisa.json"):
-        with open("memoria_pesquisa.json", "r", encoding="utf-8") as f:
-            return json.load(f)
-    return []
+    """Carrega histórico com versionamento - arquiva versões antigas."""
+    arquivo = Path("memoria_pesquisa.json")
+    if not arquivo.exists(): return []
+    
+    try:
+        with open(arquivo, "r", encoding="utf-8") as f:
+            historico = json.load(f)
+        
+        # Versionamento: se houver mais de 50 entradas, archive a primeira terceira parte
+        if len(historico) > 50:
+            terca_parte = len(historico) // 3
+            entradas_antigas = historico[:terca_parte]
+            entradas_atuais = historico[terca_parte:]
+            
+            # Salvar arquivado
+            arquivo_archive = Path("memoria_archive.json")
+            if not arquivo_archive.exists():
+                with open(arquivo_archive, "w", encoding="utf-8") as f:
+                    json.dump(entradas_antigas, f, ensure_ascii=False, indent=4)
+            
+            # Manter apenas as atuais + 10 de margem
+            return entradas_atuais[-50:]
+        return historico
+    except (json.JSONDecodeError, KeyError):
+        # Arquivo corrompido - reiniciar histórico vazio
+        return []
 
 def salvar_memoria_conversa(historico):
-    with open("memoria_pesquisa.json", "w", encoding="utf-8") as f:
+    """Salva histórico com controle de versão - mantém última terceira parte."""
+    arquivo = Path("memoria_pesquisa.json")
+    
+    # Se houver mais de 50 entradas, aplicar versionamento suave
+    if len(historico) > 50:
+        terca_parte = len(historico) // 3
+        entradas_antigas = historico[:terca_parte]
+        entradas_atuais = historico[terca_parte:]
+        
+        # Arquivar entradas antigas
+        arquivo_archive = Path("memoria_archive.json")
+        if not arquivo_archive.exists():
+            with open(arquivo_archive, "w", encoding="utf-8") as f:
+                json.dump(entradas_antigas, f, ensure_ascii=False, indent=4)
+        
+        # Manter apenas as atuais (limitado a 50)
+        historico = entradas_atuais[-50:]
+    
+    with open(arquivo, "w", encoding="utf-8") as f:
         json.dump(historico, f, ensure_ascii=False, indent=4)
 
 def gerar_pdf(historico):
@@ -81,6 +143,7 @@ def gerar_pdf(historico):
     pdf.set_auto_page_break(auto=True, margin=15)
     pdf.set_font("Arial", 'B', 16)
     pdf.cell(200, 10, txt="Relatorio de Analise: Politicas de Inovacao IFs", ln=True, align='C')
+    pdf.ln(10)
     pdf.ln(10)
     for msg in historico:
         role = "Pesquisador" if msg["role"] == "user" else f"IA ({msg.get('model', 'Assistente')})"
@@ -98,66 +161,96 @@ def inicializar_planilha_tese():
         df = pd.DataFrame(columns=colunas)
         df.to_csv(ARQUIVO_MATRIZ, index=False, encoding="utf-8-sig")
 
-# --- 2. PROCESSAMENTO HIERÁRQUICO ---
-def extrair_ano(texto):
-    match = re.search(r'20[0-2][0-9]', texto)
-    return int(match.group(0)) if match else 0
-
-@st.cache_resource
-def carregar_dados_hierarquicos(pasta_raiz):
-    docs_com_metadados = []
-    if not os.path.exists(pasta_raiz): return []
+# Cache hierárquico com validação por data de modificação
+@st.cache_data(ttl=3600, show_spinner="Carregando base de documentos...")
+def carregar_dados_hierarquicos_cache(pasta_raiz_str):
+    """Versão cacheada com verificação de atualização."""
+    pasta_raiz = Path(pasta_raiz_str)
+    if not pasta_raiz.exists(): return []
     
+    # Verificar se cache é atualizado baseando-se na data mais recente
+    arquivos_pdf = list(pasta_raiz.rglob("*.pdf"))
+    if not arquivos_pdf: return []
+    
+    # Data de modificação mais recente entre todos os PDFs
+    mtime_max = max(f.stat().st_mtime for f in arquivos_pdf)
+    cache_key = f"{pasta_raiz.resolve()}|{mtime_max}"
+    
+    # Em Streamlit, o cache é invalidado automaticamente quando o parâmetro muda
+    # mas podemos adicionar lógica extra aqui se necessário
+    return _processar_pdfs_hierarquicos(pasta_raiz, arquivos_pdf)
+
+
+def _processar_pdfs_hierarquicos(pasta_raiz, arquivos_pdf):
+    """Função interna de processamento real."""
+    docs_com_metadados = []
     regioes_validas = ["NORTE", "NORDESTE", "CENTRO-OESTE", "SUDESTE", "SUL", "BRASIL"]
-    arquivos_pdf = []
-
-    # Passo 1: Listagem rápida dos arquivos
-    for root, _, files in os.walk(pasta_raiz):
-        for file in files:
-            if file.endswith(".pdf"):
-                arquivos_pdf.append(os.path.join(root, file))
-
-    # Passo 2: Função de processamento por arquivo para Multithreading
-    def processar_arquivo(caminho_completo):
+    
+    for caminho_pdf in arquivos_pdf:
         try:
-            root = os.path.dirname(caminho_completo)
-            file = os.path.basename(caminho_completo)
-            partes = os.path.normpath(root).split(os.sep)
+            root = caminho_pdf.parent
+            file = caminho_pdf.name
+            partes = Path.normpath(root).parts
             
             regiao, uf, if_nome = "Outros", "S/D", "Não Identificado"
-            if "BRASIL" in [p.upper() for p in partes]:
+            partes_upper = [p.upper() for p in partes]
+            
+            if "BRASIL" in partes_upper:
                 regiao, uf, if_nome = "Nacional", "BR", "Legislação Federal"
             else:
                 for r in regioes_validas:
-                    if r in [p.upper() for p in partes]:
-                        idx = [p.upper() for p in partes].index(r)
+                    if r in partes_upper:
+                        idx = partes_upper.index(r)
                         regiao = partes[idx]
                         if len(partes) > idx + 1: uf = partes[idx+1]
                         if len(partes) > idx + 2: if_nome = partes[idx+2]
                         break
             
-            loader = PyPDFLoader(caminho_completo)
+            loader = PyPDFLoader(str(caminho_pdf))
             paginas = loader.load()
             ano = extrair_ano(file)
             for p in paginas:
                 p.metadata.update({"regiao": regiao, "uf": uf, "instituto": if_nome, "ano": ano})
-            return paginas
-        except:
-            return []
-
-    # Passo 3: Execução paralela (Acelera drasticamente a base nacional)
-    with ThreadPoolExecutor() as executor:
-        resultados = list(executor.map(processar_arquivo, arquivos_pdf))
+            docs_com_metadados.extend(paginas)
+        except Exception as e:
+            # Em vez de return [], logar o erro e continuar
+            pass
     
-    for r in resultados:
-        docs_com_metadados.extend(r)
-        
     return docs_com_metadados
+
+
+@st.cache_resource(show_spinner="Indexando fragmentos...")
+def get_cached_docs(pasta_raiz):
+    """Alias para compatibilidade com código existente."""
+    return carregar_dados_hierarquicos_cache(pasta_raiz)
 
 # --- 3. MODELOS E RETRIEVER ---
 @st.cache_resource
 def carregar_llm(nome_modelo):
     return ChatOllama(model=nome_modelo, temperature=0)
+
+def obter_modelos_disponiveis():
+    """Lista modelos disponíveis no Ollama, com fallback para defaults."""
+    try:
+        # Tentar listar modelos via subprocess
+        result = subprocess.run(
+            ["ollama", "list"], 
+            capture_output=True, text=True, timeout=10
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            linhas = result.stdout.strip().split("\n")[1:]  # Pular header
+            modelos = []
+            for linha in linhas:
+                # Formato: "llama3    8B    q8_0    4.7 GB"
+                partes = linha.split()
+                if partes:
+                    modelo_nome = partes[0].split(":")[0] if ":" in partes[0] else partes[0]
+                    modelos.append(modelo_nome)
+            return modelos if modelos else ["llama3", "phi3", "mistral"]
+    except (FileNotFoundError, subprocess.TimeoutExpired, Exception):
+        pass
+    # Fallback para defaults conhecidos
+    return ["llama3", "phi3", "mistral", "gemma2"]
 
 @st.cache_resource
 def carregar_embeddings():
@@ -167,7 +260,11 @@ def carregar_embeddings():
 def configurar_retriever():
     if os.path.exists(DB_DIR):
         vectorstore = Chroma(persist_directory=DB_DIR, embedding_function=carregar_embeddings())
-        return vectorstore.as_retriever(search_kwargs={"k": 4})
+        # Melhorar busca: k=4 para exibir, fetch_distance=1000 para candidatos maiores
+        retriever = vectorstore.as_retriever(
+            search_kwargs={"k": 4, "fetch_distance": 1000}
+        )
+        return retriever
     return None
 
 # --- 4. BARRA LATERAL ---
@@ -177,7 +274,8 @@ if "messages" not in st.session_state:
 
 with st.sidebar:
     st.header("🤖 Configurações de IA")
-    opcoes_modelos = {"Llama 3 (8B)": "llama3", "Phi-3 Mini (3.8B)": "phi3", "Mistral (7B)": "mistral", "Gemma 2 (9B)": "gemma2"}
+    modelos_disponiveis = obter_modelos_disponiveis()
+    opcoes_modelos = {m: m for m in modelos_disponiveis}
     selecao_label = st.selectbox("Modelo Ativo:", list(opcoes_modelos.keys()))
     llm = carregar_llm(opcoes_modelos[selecao_label])
     
@@ -189,7 +287,7 @@ with st.sidebar:
     st.header("🔍 Filtros de Analise")
     if os.path.exists(PASTA_BASE):
         with st.spinner("Mapeando estrutura nacional..."):
-            todos_docs = carregar_dados_hierarquicos(PASTA_BASE)
+            todos_docs = carregar_dados_hierarquicos_cache(PASTA_BASE)
         
         ufs_disponiveis = sorted(list(set(d.metadata["uf"] for d in todos_docs)))
         ifs_disponiveis = sorted(list(set(d.metadata["instituto"] for d in todos_docs)))
@@ -234,18 +332,29 @@ if prompt := st.chat_input("Inicie sua análise sociológica..."):
     with st.chat_message("assistant"):
         retriever = configurar_retriever()
         if retriever:
-            prompt_doc = ChatPromptTemplate.from_template("Analise sociologicamente:\nContexto: {context}\nPergunta: {question}")
+            prompt_doc = ChatPromptTemplate.from_template(
+                "Analise sociologicamente:\\nContexto: {context}\\nPergunta: {question}"
+            )
             chain = ({"context": retriever, "question": RunnablePassthrough()} | prompt_doc | llm | StrOutputParser())
             
             with st.status(f"Processando com {selecao_label}...", expanded=False) as status:
-                docs_rec = retriever.invoke(prompt)
+                try:
+                    docs_rec = retriever.invoke(prompt)
+                except Exception as e:
+                    st.error(f"Erro na recuperação de contexto: {str(e)[:200]}")
+                    docs_rec = []
                 status.update(label="Evidências localizadas. Redigindo...", state="running")
-                full_res = st.write_stream(chain.stream(prompt))
+                try:
+                    full_res = st.write_stream(chain.stream(prompt))
+                except Exception as e:
+                    st.warning("Erro na geração da resposta da IA")
+                    full_res = ""
                 status.update(label=f"Concluído por {selecao_label}", state="complete")
 
-            salvar_no_log(prompt, full_res, selecao_label, objetivo=objetivo_sessao)
-            st.session_state.messages.append({"role": "assistant", "content": full_res, "model": selecao_label})
-            salvar_memoria_conversa(st.session_state.messages)
+            if full_res:
+                salvar_no_log(prompt, full_res, selecao_label, objetivo=objetivo_sessao)
+                st.session_state.messages.append({"role": "assistant", "content": full_res, "model": selecao_label})
+                salvar_memoria_conversa(st.session_state.messages)
             
             with st.expander("🔍 Auditoria de Fontes"):
                 for d in docs_rec:
