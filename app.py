@@ -18,7 +18,7 @@ from langchain_core.output_parsers import StrOutputParser
 # --- 1. CONFIGURAÇÕES, MEMÓRIA E BACKUP ---
 st.set_page_config(page_title="SocioInova RAG - UFBA", layout="wide")
 DB_DIR = "./memoria_longo_prazo"
-PASTA_BASE = "C:/Users/jonat/analise_ifs/documentos_inovação"
+PASTA_BASE = "documentos_inovação"
 ARQUIVO_MATRIZ = "matriz_extracao_tese.csv"
 
 def realizar_backup():
