@@ -191,6 +191,27 @@ _STOPWORDS_EXTRA = {
     "pra", "pro", "pros", "pras", "noutro", "noutra", "noutros", "noutras",
     # Formas verbais funcionais recorrentes
     "tendo", "houve", "houver", "havido", "sido",
+    # Siglas de instituições (IFs), de órgãos e ruído de documentos — não são conteúdo
+    # analítico e não devem aglutinar tópicos LDA, nuvem, co-ocorrência ou ranking.
+    "ifb", "ifpb", "ifro", "ifto", "ifmt", "ifap", "ifnmg", "ifpe", "ifrj",
+    "ifba", "ifrs", "ifce", "ifrr", "ifes", "ifpr", "ifsul", "ifpi", "ifal",
+    "ifmg", "ifms", "ifpa", "ifsc", "ifsp", "iffar", "ifam", "ifflu", "ifs",
+    "iffs", "ifg", "ifc", "ifr", "ifn", "ifm", "ife", "ifp",
+    "ifsuldeminas", "ifsudestemg", "ifsertao", "ifgoiano", "ifmtech",
+    "cefet", "cefetes", "ict", "icts", "nit", "pdi", "ead", "conif", "forplad",
+    "pigete", "capq", "cnpq", "mec", "fndct", "fap", "ufba", "ufb", "ieps",
+    "www", "http", "https", "edu", "gov", "ccivil", "planalto", "htm", "html",
+    "govbr", "orgbr",
+    # Siglas de sistema e fragmentos de extração PDF (ex.: "ins\ntuto" → "ins", "tuto")
+    "sei", "ins", "tuto",
+    # Jargão legislativo (fórmulas de texto de lei sem valor analítico) e meses de
+    # referência legal — saturam a tokenização e criam tópicos artificiais no LDA.
+    # ("marco" é intencionalmente preservado: aparece em "marco regulatório").
+    "incluido", "redacao", "provisoria", "vigencia", "revogado", "dada", "vide",
+    "dezembro", "janeiro", "fevereiro", "abril", "julho", "agosto", "setembro",
+    # Fragmentos de palavras partidas por extração de PDF (pedaços sem significado).
+    "vidades", "tucional", "instit", "atividad", "sertaoa", "educa8vo",
+    "educac", "educao", "insa", "pireitor",
 }
 STOPWORDS_PT |= _STOPWORDS_EXTRA
 
@@ -667,3 +688,188 @@ def kwic(documentos: list[dict], termo: str, janela: int = 60, maximo: int = 60)
             if contador >= maximo:
                 return linhas
     return linhas
+
+
+# --- Série histórica (volume documental por ano de aprovação) ---
+
+def serie_historica(documentos: list[dict]) -> dict:
+    """Volume documental por ano de aprovação, clusterizado por tipo e por região.
+
+    Retorna dict com DataFrames prontos para plotagem:
+      - "por_tipo":  anos × tipo (Legislação Federal / Política Institucional)
+      - "por_regiao": anos × região (apenas políticas institucionais, que têm UF/região)
+      - "anos":       todos os anos presentes (ordenados)
+    """
+    import pandas as pd
+    tabela = []
+    for d in documentos:
+        if d.get("ano") is None:
+            continue
+        tabela.append({"ano": int(d["ano"]), "tipo": d.get("tipo", "S/D"),
+                       "regiao": d.get("regiao", "S/D")})
+    if not tabela:
+        return {"por_tipo": pd.DataFrame(columns=["ano", "tipo", "Documentos"]),
+                "por_regiao": pd.DataFrame(columns=["ano", "regiao", "Documentos"]),
+                "anos": []}
+    df = pd.DataFrame(tabela)
+    anos = sorted(df["ano"].unique().tolist())
+
+    por_tipo = (df.groupby(["ano", "tipo"]).size().reset_index(name="Documentos")
+                .rename(columns={"tipo": "Cluster"}))
+    por_tipo["ano"] = por_tipo["ano"].astype(int)
+
+    inst = df[df["tipo"] != "Legislação Federal"]
+    if inst.empty:
+        por_regiao = pd.DataFrame(columns=["ano", "regiao", "Documentos"])
+    else:
+        por_regiao = (inst.groupby(["ano", "regiao"]).size().reset_index(name="Documentos")
+                      .rename(columns={"regiao": "Região"}))
+        por_regiao["ano"] = por_regiao["ano"].astype(int)
+    return {"por_tipo": por_tipo, "por_regiao": por_regiao, "anos": anos}
+
+
+# --- Bases legais nacionais citadas nos documentos ---
+
+_BASE_LEGAL_NOME = {
+    "lei no 8.112": "Lei nº 8.112/1990 (Regime Jurídico)",
+    "lei no 8.212": "Lei nº 8.212/1991 (Custeio da Seguridade)",
+    "lei no 8.248": "Lei nº 8.248/1991 (Lei de Informática)",
+    "lei no 8.666": "Lei nº 8.666/1993 (Licitações e Contratos)",
+    "lei no 8.745": "Lei nº 8.745/1993 (Contratação Temporária)",
+    "lei no 8.958": "Lei nº 8.958/1994 (Fundações de Apoio)",
+    "lei no 9.250": "Lei nº 9.250/1995 (IRPF)",
+    "lei no 9.279": "Lei nº 9.279/1996 (Propriedade Industrial)",
+    "lei no 9.456": "Lei nº 9.456/1997 (Cultivares)",
+    "lei no 9.609": "Lei nº 9.609/1998 (Lei do Software)",
+    "lei no 9.610": "Lei nº 9.610/1998 (Direitos Autorais)",
+    "lei no 10.168": "Lei nº 10.168/2000 (CIDE Tecnologia)",
+    "lei no 10.973": "Lei nº 10.973/2004 (Incentivo à Inovação)",
+    "lei no 11.196": "Lei nº 11.196/2005 (Lei do Bem)",
+    "lei no 11.314": "Lei nº 11.314/2006",
+    "lei no 11.484": "Lei nº 11.484/2007",
+    "lei no 11.184": "Lei nº 11.184/2005",
+    "lei no 11.892": "Lei nº 11.892/2008 (Lei dos IFs)",
+    "lei no 12.772": "Lei nº 12.772/2012 (Carreira EBTT)",
+    "lei no 13.123": "Lei nº 13.123/2015 (Biodiversidade)",
+    "lei no 13.243": "Lei nº 13.243/2016 (Marco Legal da Inovação)",
+    "lei no 13.246": "Lei nº 13.246/2016 (Convertida da MP 690)",
+    "lei no 14.133": "Lei nº 14.133/2021 (Nova Lei de Licitações)",
+    "lei no 11.091": "Lei nº 11.091/2005 (Plano de Carreira)",
+    "lei no 11.784": "Lei nº 11.784/2008 (Reestruturação de Carreiras)",
+    "lei no 13.146": "Lei nº 13.146/2015 (Estatuto da Pessoa com Deficiência)",
+    "lei complementar no 95": "LC nº 95/1998 (Elaboração de Leis)",
+    "lei complementar no 123": "LC nº 123/2006 (Simples Nacional)",
+    "lei complementar no 182": "LC nº 182/2021 (Marco Legal das Startups)",
+    "lei do bem": "Lei do Bem (nº 11.196/2005)",
+    "marco legal das startups": "LC nº 182/2021 (Marco Legal das Startups)",
+    "marco legal da inovacao": "Lei nº 13.243/2016 (Marco Legal da Inovação)",
+    "lei de informatica": "Lei de Informática (nº 8.248/1991)",
+    "lei do software": "Lei do Software (nº 9.609/1998)",
+    "lei de incentivo a inovacao": "Lei nº 10.973/2004 (Incentivo à Inovação)",
+    "decreto no 2.553": "Decreto nº 2.553/1998 (Software)",
+    "decreto no 5.205": "Decreto nº 5.205/2004 (Lei 10.973)",
+    "decreto no 5.563": "Decreto nº 5.563/2005 (Lei 10.973)",
+    "decreto no 7.423": "Decreto nº 7.423/2010 (Regulamenta Lei 11.892)",
+    "decreto no 8.539": "Decreto nº 8.539/2015 (Processo Eletrônico)",
+    "decreto no 9.283": "Decreto nº 9.283/2018 (Regulamentação do Marco Legal)",
+    "decreto no 10.534": "Decreto nº 10.534/2020 (PNI)",
+    "decreto no 12.002": "Decreto nº 12.002/2024",
+    "decreto no 6.759": "Decreto nº 6.759/2009 (Impostos/Tributação)",
+}
+
+_BASE_LEGAL_REGEX = re.compile(
+    r"(lei\s+complementar\s+no\s+\d{1,3}(?:\.\d{3})*(?:/\d{2,4})?|"
+    r"lei\s+no\s+\d{1,3}(?:\.\d{3})*(?:/\d{2,4})?|"
+    r"decreto\s+no\s+\d{1,3}(?:\.\d{3})*(?:/\d{2,4})?|"
+    r"mp\s+no\s+\d{1,3}(?:\.\d{3})*(?:/\d{2,4})?|"
+    r"lei\s+do\s+bem|"
+    r"marco\s+legal\s+da\s+startups|"
+    r"marco\s+legal\s+da\s+inovacao|"
+    r"lei\s+de\s+informatica|"
+    r"lei\s+do\s+software|"
+    r"lei\s+de\s+incentivo\s+a\s+inovacao)",
+    re.IGNORECASE,
+)
+
+
+def _limpar_base_legal(texto: str) -> str:
+    """Normaliza o texto para casamento robusto (sem acentos, quebras colapsadas).
+
+    - Colapsa quebras de linha/espaços.
+    - Normaliza "n. / nº / n°" → "no".
+    - Corrige micro-quebras de extração de PDF dentro do número (ex.: "9.2 79" → "9.279").
+    - Remove dígito de numeração solto que o PDF insere antes do número da base
+      (ex.: "lei no 2 10.973" → "lei no 10.973").
+    """
+    t = re.sub(r"\s+", " ", remover_acentos(texto))
+    t = re.sub(r"\bn\s*[oº°]?\s*(?=\d)", "no ", t)
+    # remove dígito solto de numeração entre "no" e o número da base legal
+    t = re.sub(r"\b((?:lei|decreto|mp)\s+no\s+)\d\s+(?=\d)", r"\1", t)
+    # só remove espaço dentro do grupo decimal (número com ponto: "9.2 79")
+    t = re.sub(r"(\d\.\d{1,3})\s+(?=\d)", r"\1", t)
+    return t
+
+
+def _nome_base_legal(chave: str) -> str:
+    """Mapeia uma chave detectada para o nome canônico da base legal.
+
+    A chave detectada pode variar na formatação (nº/Nº, /ano, espaços). A canonização
+    normaliza "lei no X" e "lei no X/YY" para a mesma entrada do dicionário.
+    """
+    chave = re.sub(r"/\d{2,4}$", "", chave).lower().strip()
+    if chave in _BASE_LEGAL_NOME:
+        return _BASE_LEGAL_NOME[chave]
+    num = re.sub(r"[^\d]", "", chave)
+    return None if len(num) < 4 else f"{chave.split()[0].title()} nº {'.'.join(num[i:i+3] for i in range(0,len(num),3))}"
+
+
+def bases_legais_citadas(documentos: list[dict]) -> dict:
+    """Detecta as bases legais nacionais citadas em cada documento.
+
+    Retorna: {"por_doc": {arquivo: [nomes]}, "por_base": {nome: n_docs},
+              "todas": [nomes] (ordenadas por recência de código)}
+    """
+    from collections import Counter
+    por_doc = {}
+    base_por_doc = Counter()
+    for d in documentos:
+        if d.get("tipo") == "Legislação Federal":
+            continue
+        t = _limpar_base_legal(d.get("texto") or "")
+        chaves = set(m.group(1).lower().strip() for m in _BASE_LEGAL_REGEX.finditer(t))
+        nomes = sorted({n for c in chaves if (n := _nome_base_legal(c)) is not None})
+        if nomes:
+            por_doc[d.get("arquivo", "?")] = nomes
+            base_por_doc.update(nomes)
+    todas = sorted(base_por_doc.keys())
+    return {"por_doc": por_doc, "por_base": dict(base_por_doc), "todas": todas}
+
+
+def tabela_base_legal_por_instituicao(documentos: list[dict]) -> "pd.DataFrame":
+    """Tabela UF × Instituição × Documentos vinculados × Bases legais citadas.
+
+    Uma linha por documento institucional; inclui a UF/instituição e as bases citadas.
+    """
+    import pandas as pd
+    dados = bases_legais_citadas(documentos)
+    linhas = []
+    for d in documentos:
+        if d.get("tipo") == "Legislação Federal":
+            continue
+        arquivo = d.get("arquivo", "?")
+        bases = dados["por_doc"].get(arquivo, [])
+        linhas.append({
+            "UF": d.get("uf", "S/D"),
+            "Região": d.get("regiao", "S/D"),
+            "Instituição": d.get("instituto", "S/D"),
+            "Documento": arquivo,
+            "Ano": d.get("ano"),
+            "Nº bases citadas": len(bases),
+            "Bases legais citadas": "; ".join(bases),
+        })
+    if not linhas:
+        return pd.DataFrame(columns=["UF", "Região", "Instituição", "Documento",
+                                     "Ano", "Nº bases citadas", "Bases legais citadas"])
+    df = pd.DataFrame(linhas)
+    df = df.sort_values(["Região", "UF", "Instituição", "Ano"]).reset_index(drop=True)
+    return df

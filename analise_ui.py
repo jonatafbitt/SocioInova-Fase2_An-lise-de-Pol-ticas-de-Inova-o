@@ -44,9 +44,10 @@ def _filtros_gerais(resumo) -> dict:
 def render_aba(resumo):
     filtros = _filtros_gerais(resumo)
 
-    tab_nuvem, tab_cooc, tab_lda, tab_freq, tab_dims, tab_leitura = st.tabs(
+    tab_nuvem, tab_cooc, tab_lda, tab_freq, tab_dims, tab_leitura, tab_serie, tab_base = st.tabs(
         ["☁️ Nuvem de Palavras", "🕸️ Co-ocorrência", "📚 Tópicos (LDA)",
-         "📊 Frequência de Temas", "🎯 Dimensões da Diretriz", "🔎 Leitura de Documentos"])
+         "📊 Frequência de Temas", "🎯 Dimensões da Diretriz", "🔎 Leitura de Documentos",
+         "📈 Série Histórica", "📜 Base Legal por Instituição"])
 
     with tab_nuvem:
         _render_nuvem(filtros)
@@ -60,6 +61,10 @@ def render_aba(resumo):
         _render_dimensoes(filtros)
     with tab_leitura:
         _render_leitura(filtros)
+    with tab_serie:
+        _render_serie_historica(filtros)
+    with tab_base:
+        _render_base_legal(filtros)
 
 
 # --- Nuvem de palavras ---
@@ -471,3 +476,124 @@ def _render_leitura(filtros):
                 st.markdown(f"**Trecho {i+1}** ({doc['instituto']}, {doc['uf']})")
                 st.write(trecho)
                 st.divider()
+
+
+# --- Série histórica ---
+
+@st.cache_data(show_spinner=False)
+def _serie_cacheada(chave):
+    docs = ac.carregar_documentos_analise(_filtros_de_chave(chave))
+    return ac.serie_historica(docs)
+
+
+def _render_serie_historica(filtros):
+    st.subheader("📈 Série Histórica: Volume Documental por Ano de Aprovação")
+    st.caption(
+        "Distribuição do corpus filtrado por ano, separada por cluster. As legislações federais "
+        "(BRASIL) são agregadas por tipo; as políticas institucionais, por região de origem.")
+
+    docs = ac.carregar_documentos_analise(filtros)
+    if not docs:
+        st.warning("Nenhum documento corresponde aos filtros.")
+        return
+
+    import plotly.express as px
+    import pandas as pd
+
+    dados = _serie_cacheada(_chave_filtros(filtros))
+    alcance = f"{min(dados['anos'])}–{max(dados['anos'])}" if dados["anos"] else "—"
+    st.caption(f"{len(docs)} documentos · {len(dados['anos'])} anos de aprovação ({alcance})")
+
+    graf_tipo, graf_regiao = st.columns(2)
+
+    with graf_tipo:
+        pt = dados["por_tipo"]
+        if pt.empty:
+            st.info("Sem dados de série por tipo.")
+        else:
+            fig = px.bar(pt, x="ano", y="Documentos", color="Cluster",
+                         barmode="group", title="Por Cluster (Tipo de Documento)",
+                         labels={"ano": "Ano", "Documentos": "Nº de documentos"})
+            fig.update_layout(legend_title_text="Cluster", height=360,
+                              xaxis=dict(dtick=1))
+            st.plotly_chart(fig, width="stretch")
+
+    with graf_regiao:
+        pr = dados["por_regiao"]
+        if pr.empty:
+            st.info("Sem dados por região (corpus exclusivamente de legislação federal).")
+        else:
+            fig = px.bar(pr, x="ano", y="Documentos", color="Região",
+                         barmode="group", title="Políticas Institucionais por Região",
+                         labels={"ano": "Ano", "Documentos": "Nº de documentos"})
+            fig.update_layout(legend_title_text="Região", height=360,
+                              xaxis=dict(dtick=1))
+            st.plotly_chart(fig, width="stretch")
+
+    st.divider()
+    st.markdown("**Tabela de apoio** — contagem de documentos por ano e cluster")
+    tabela = pd.pivot_table(dados["por_tipo"], index="ano", columns="Cluster",
+                            values="Documentos", aggfunc="sum", fill_value=0)
+    st.dataframe(tabela, width="stretch")
+
+
+# --- Base Legal por Instituição ---
+
+@st.cache_data(show_spinner=False)
+def _base_legal_cacheada(chave):
+    docs = ac.carregar_documentos_analise(_filtros_de_chave(chave))
+    return ac.tabela_base_legal_por_instituicao(docs)
+
+
+def _render_base_legal(filtros):
+    st.subheader("📜 Base Legal Nacionais Citadas por Instituição")
+    st.caption(
+        "Para cada política institucional do corpus filtrado, lista as bases legais nacionais "
+        "citadas (leis, decretos e MPs) e marca a aderência ao Marco Legal da Inovação.")
+
+    docs = ac.carregar_documentos_analise(filtros)
+    if not docs:
+        st.warning("Nenhum documento corresponde aos filtros.")
+        return
+
+    import pandas as pd
+
+    df = _base_legal_cacheada(_chave_filtros(filtros))
+    if df is None or df.empty:
+        st.info("Nenhuma política institucional no corpus filtrado.")
+        return
+
+    df = df.copy()
+    marco = df["Bases legais citadas"].str.contains("Marco Legal", na=False)
+    df["Aderência ao Marco Legal"] = df["Bases legais citadas"].apply(
+        lambda b: "Sim — cita o Marco Legal" if "Marco Legal" in b
+        else ("Sem bases citadas" if not b.strip() else "Apenas bases anteriores"))
+
+    c1, c2, c3 = st.columns(3)
+    total = len(df)
+    com_marco = int(marco.sum())
+    ob_nenhuma = int((df["Bases legais citadas"] == "").sum())
+    c1.metric("Políticas analisadas", total)
+    c2.metric("Citam o Marco Legal", com_marco)
+    c3.metric("Sem bases citadas", ob_nenhuma)
+
+    st.dataframe(df, hide_index=True, width="stretch")
+
+    with st.expander("📊 Distribuição: aderência ao Marco Legal de Ciência, Tecnologia e Inovação"):
+        contagem = df["Aderência ao Marco Legal"].value_counts().rename_axis("Situação").reset_index(
+            name="Documentos")
+        st.dataframe(contagem, hide_index=True, width="stretch")
+
+    with st.expander("📚 Principais bases legais citadas (todo o corpus filtrado)"):
+        prop = _base_legal_prop_cacheada(_chave_filtros(filtros))
+        if prop:
+            prop_df = pd.DataFrame(prop, columns=["Base legal", "Documentos"])
+            prop_df = prop_df.sort_values("Documentos", ascending=False).reset_index(drop=True)
+            st.dataframe(prop_df, hide_index=True, width="stretch")
+
+
+@st.cache_data(show_spinner=False)
+def _base_legal_prop_cacheada(chave):
+    docs = ac.carregar_documentos_analise(_filtros_de_chave(chave))
+    pes = ac.bases_legais_citadas(docs)
+    return sorted(pes["por_base"].items(), key=lambda x: -x[1])
