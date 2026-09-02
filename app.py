@@ -1,21 +1,21 @@
 import streamlit as st
 import os
-import re
 import json
 import shutil
 import subprocess  # Adicionado para listar modelos Ollama
 import pandas as pd
 from datetime import datetime
 from fpdf import FPDF
-from concurrent.futures import ThreadPoolExecutor # Para acelerar o carregamento
 from pathlib import Path
-from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_ollama import OllamaEmbeddings, ChatOllama
 from langchain_community.vectorstores import Chroma
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnablePassthrough
 from langchain_core.output_parsers import StrOutputParser
+
+import analise_corpus as ac
+import analise_ui
 
 # Caminho base para dados
 BASE_DIR = Path(__file__).parent
@@ -27,6 +27,44 @@ st.set_page_config(page_title="SocioInova RAG - UFBA", layout="wide")
 DB_DIR = "./memoria_longo_prazo"
 PASTA_BASE = "documentos_inovação"
 ARQUIVO_MATRIZ = "matriz_extracao_tese.csv"
+LLM_PADRAO = "phi4-mini:latest"
+MAX_TOKENS_RESPOSTA = 1200
+MODELOS_EMBEDDING = {"nomic-embed-text", "all-minilm", "bge-m3", "mxbai-embed-large", "snowflake-arctic-embed"}
+MODELOS_PRIORIDADE = [LLM_PADRAO, "gemma3:4b", "qwen2:1.5b", "phi3:latest"]
+MODELOS_FALLBACK = MODELOS_PRIORIDADE + ["llama3", "mistral", "gemma2", "qwen3:1.7b", "qwen3:4b"]
+MODELOS_DESCRICAO = {
+    "phi4-mini": "Boa síntese técnica e normativas",
+    "gemma3": "Multilíngue, boa com textos jurídicos",
+    "qwen2": "Leve e rápido no CPU",
+    "phi3": "Mais leve, respostas rápidas",
+    "llama3": "Referência clássica, uso geral",
+    "mistral": "Boa para análise textual",
+    "gemma2": "Multilíngue, fluidez em português",
+    "qwen3": "Raciocínio robusto; requer Ollama atualizado",
+}
+
+DIRETRIZES_ANALITICAS = """Você é um assistente de pesquisa sociológica, especializado na governança da inovação em Instituições de Ciência, Tecnologia e Inovação (ICTIs) de direito público da Rede Federal de Educação Profissional, Científica e Tecnológica (Institutos Federais).
+
+OBJETIVO DA SESSÃO DE PESQUISA:
+{objetivo}
+
+QUADRO ANALÍTICO - responda articulando, quando aplicáveis, as cinco dimensões da Sociologia da Inovação:
+
+1. FUNDAMENTOS EPISTEMOLÓGICOS DA POLÍTICA: quais formas de conhecimento são reconhecidas, valorizadas e priorizadas? A política reforça o pensamento imitativo, o eurocentrismo e o tecnocentrismo, ou promove a simetria de saberes (justiça epistêmica, pluriversalidade, colonialidade do saber - Guerreiro Ramos)?
+2. ATORES, REDES E RELAÇÕES DE PODER: quem participa da formulação e da implementação da política? O instrumento normativo atua como Ponto de Passagem Obrigatório (Teoria Ator-Rede - Callon), centralizando poder, ou distribui agência? Quem é incluído ou excluído (sociedade civil, comunidades, arranjos produtivos locais, economia solidária)?
+3. RELEVÂNCIA E IMPACTO SOCIAL: a política transcende o imperativo de mercado? Prioriza a solução de problemas locais e a distribuição equitativa de benefícios (razão substantiva - Guerreiro Ramos; Bem Viver - Acosta; ponto de vista da sociedade civil - Burawoy)?
+4. DESENHO INSTITUCIONAL E GOVERNANÇA: as normas operam como Código Técnico rígido (Feenberg) ou abrem margem de manobra para a Racionalização Subversiva nos campi? Há governança participativa, transparência e autonomia institucional (gestores de NIT, pesquisadores)?
+5. CONTEXTUALIZAÇÃO E DESENVOLVIMENTO REGIONAL: a política responde ao contexto sócio-histórico, cultural e ambiental do território? Promove desenvolvimento endógeno e redução sociológica (Guerreiro Ramos) ou reproduz dependências históricas e externas?
+
+PRINCÍPIOS ORIENTADORES: especificidade do contexto e pluriversalidade; justiça social e equidade; justiça epistêmica e cocriação de conhecimento; impacto social transformador; propósito público e governança democrática.
+
+REGRAS DE CONDUTA ANALÍTICA:
+- Trate a inovação como fenômeno socialmente construído e campo de disputa; evite o solucionismo tecnológico e a suposta neutralidade da técnica.
+- Distinga racionalidade instrumental (métricas de patentes, produtividade, eficiência de mercado) de racionalidade substantiva (bem-estar coletivo, valores, impacto social).
+- Contextualize territorialmente: identifique a instituição, a UF, o ano e o tipo de documento (política de inovação, edital, portaria, regimento de NIT, legislação federal).
+- Fundamente cada afirmação em trechos dos documentos recuperados; quando a evidência for insuficiente, registre a lacuna como hipótese analítica, sem inventar fontes.
+- Aponte tensões entre o arcabouço normativo nacional e as dinâmicas locais dos campi e territórios.
+- Estruture a resposta em seções curtas: síntese; leitura por dimensões; tensões e lacunas; implicações para a pesquisa."""
 
 def realizar_backup():
     data = datetime.now().strftime("%Y-%m-%d")
@@ -41,21 +79,6 @@ def realizar_backup():
     shutil.make_archive(nome_zip, 'zip', nome_zip)
     shutil.rmtree(nome_zip)
     return f"{nome_zip}.zip"
-
-def salvar_no_log(pergunta, resposta, modelo, objetivo="Análise Geral"):
-    data_hora = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
-    with open("registro_analise_tese.txt", "a", encoding="utf-8") as f:
-        f.write(f"\n{'='*60}\n")
-        f.write(f"📝 ENTRADA DE DIÁRIO DE BORDO - {data_hora}\n")
-        f.write(f"MODELO UTILIZADO: {modelo}\n")
-        f.write(f"OBJETIVO DA SESSÃO: {objetivo}\n")
-        f.write(f"{'='*60}\n\n")
-        f.write(f"❓ PERGUNTA DO PESQUISADOR:\n{pergunta}\n\n")
-        f.write(f"🤖 RESPOSTA DA IA:\n{resposta}\n\n")
-        f.write(f"✍️ NOTAS SOCIOLÓGICAS (Preencher Manualmente):\n")
-        f.write(f"- Insight:\n")
-        f.write(f"- Validação de Fontes:\n")
-        f.write(f"{'_'*60}\n")
 
 def registrar_na_matriz(eixo, variavel, instituto, resumo_ia):
     nova_linha = {
@@ -137,23 +160,181 @@ def salvar_memoria_conversa(historico):
     with open(arquivo, "w", encoding="utf-8") as f:
         json.dump(historico, f, ensure_ascii=False, indent=4)
 
-def gerar_pdf(historico):
+def _filtro_pdf(texto) -> str:
+    """Mantém ASCII e acentos latin-1 (faixa suportada pela fonte core); remove o resto."""
+    saida = []
+    for ch in str(texto):
+        o = ord(ch)
+        if ch in "\t\n\r" or 0x20 <= o <= 0x7E or 0xA0 <= o <= 0xFF:
+            saida.append(ch)
+        else:
+            saida.append(" ")
+    return "".join(saida)
+
+
+def _secao_pdf(pdf, texto):
+    pdf.set_font("Arial", "B", 13)
+    pdf.set_x(pdf.l_margin)
+    pdf.multi_cell(0, 8, text=_filtro_pdf(texto))
+    pdf.ln(1)
+
+
+def _sub_pdf(pdf, texto):
+    pdf.set_font("Arial", "B", 11)
+    pdf.set_x(pdf.l_margin)
+    pdf.multi_cell(0, 6.5, text=_filtro_pdf(texto))
+    pdf.ln(0.5)
+
+
+def _linha_pdf(pdf, texto, tamanho=10):
+    pdf.set_font("Arial", "", tamanho)
+    pdf.set_x(pdf.l_margin)
+    pdf.multi_cell(0, 5, text=_filtro_pdf(texto))
+
+
+def _tabela_pdf(pdf, cabecalhos, linhas, largs, tamanho=8):
+    """Tabela simples de uma linha por registro (sem quebra interna)."""
+    from fpdf.enums import XPos, YPos
+    w_total = pdf.w - pdf.l_margin - pdf.r_margin
+    largura = [w_total * p / sum(largs) for p in largs]
+
+    def celula(texto, w_final=False):
+        pdf.set_font("Arial", "B", tamanho)
+        texto_c = _filtro_pdf(str(texto))
+        while pdf.get_string_width(texto_c) > w_total * 0.95 and len(texto_c) > 4:
+            texto_c = texto_c[:-1]
+        if w_final:
+            pdf.cell(w_total, 5, text=texto_c, border=1, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        else:
+            pdf.cell(w_total, 5, text=texto_c, border=1, new_x=XPos.RIGHT, new_y=YPos.TOP)
+
+    for i, h in enumerate(cabecalhos):
+        celula(h, w_final=(i == len(cabecalhos) - 1))
+    for linha in linhas:
+        for j, val in enumerate(linha):
+            if j < len(largura):
+                pdf.set_font("Arial", "", tamanho)
+                texto_c = _filtro_pdf(str(val))
+                while pdf.get_string_width(texto_c) > largura[j] - 3 and len(texto_c) > 3:
+                    texto_c = texto_c[:-1]
+                if j == len(linha) - 1:
+                    pdf.cell(largura[j], 5, text=texto_c, border=1,
+                             new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+                else:
+                    pdf.cell(largura[j], 5, text=texto_c, border=1,
+                             new_x=XPos.RIGHT, new_y=YPos.TOP)
+    pdf.ln(3)
+
+
+def gerar_pdf_consolidado(historico, filtros=None):
+    """Relatório PDF consolidado: escopo/análise textual + conversa do Chat RAG."""
+    filtros = filtros or {}
     pdf = FPDF()
     pdf.add_page()
     pdf.set_auto_page_break(auto=True, margin=15)
-    pdf.set_font("Arial", 'B', 16)
-    pdf.cell(200, 10, txt="Relatorio de Analise: Politicas de Inovacao IFs", ln=True, align='C')
-    pdf.ln(10)
-    pdf.ln(10)
+    pdf.set_margins(14, 14, 14)
+
+    pdf.set_font("Arial", "B", 16)
+    pdf.set_x(pdf.l_margin)
+    pdf.multi_cell(0, 8, text="Relatorio de Analise: Politicas de Inovacao IFs", align="C")
+    pdf.ln(2)
+    pdf.set_font("Arial", "", 10)
+    pdf.set_x(pdf.l_margin)
+    pdf.multi_cell(0, 5, text=_filtro_pdf(
+        "Relatório consolidado do dashboard SocioInova RAG (Chat RAG e Análise Textual)."),
+        align="C")
+    pdf.ln(4)
+
+    # 1. Escopo da análise textual (filtros ativos)
+    _secao_pdf(pdf, "1. Escopo da análise textual (filtros ativos)")
+    for label, valores in (
+        ("UFs", filtros.get("ufs")), ("Institutos", filtros.get("ifs")),
+        ("Anos", filtros.get("anos")), ("Regiões", filtros.get("regioes")),
+        ("Tipos", filtros.get("tipos")), ("Dimensões (Quadro 1.5)", filtros.get("dimensoes")),
+    ):
+        texto = f"{label}: {', '.join(str(v) for v in valores) if valores else 'todos'}"
+        _linha_pdf(pdf, "• " + texto)
+
+    # 2. Resultados da Análise Textual
+    docs = ac.carregar_documentos_analise(filtros)
+    if docs:
+        _secao_pdf(pdf, "2. Análise textual do corpus filtrado")
+        _linha_pdf(pdf, f"Documentos analisados: {len(docs)}.")
+        pdf.ln(1)
+
+        _sub_pdf(pdf, "2.1 Termos mais frequentes (nuvem de palavras)")
+        for termo, n in ac.top_termos(docs, 12):
+            _linha_pdf(pdf, f"  • {termo}: {n}", tamanho=9)
+        pdf.ln(1)
+
+        _sub_pdf(pdf, "2.2 Frequência de temas por dimensão analítica (Quadro 1.5)")
+        df = ac.frequencia_temas(docs)
+        linhas_tabela = [
+            [r.Eixo, int(r.Documentos), int(r.Sinais), int(r.Ocorrências),
+             f"{r._5:.1f}%", f"{r._6:.1f}%"]
+            for r in df.itertuples()
+        ]
+        _tabela_pdf(pdf, ["Eixo / dimensão", "Docs", "Sinais", "Ocorr.", "Prof. %", "% docs"],
+                    linhas_tabela, [86, 18, 18, 20, 18, 18])
+        pdf.ln(1)
+
+        _sub_pdf(pdf, "2.3 Quebra por Região e por Ano")
+        for categoria, nome in (("regiao", "Região"), ("ano", "Ano")):
+            dfp = ac.frequencia_temas_por(docs, categoria)
+            if not dfp.empty:
+                _linha_pdf(pdf, f"{nome}:", tamanho=9)
+                _tabela_pdf(pdf, [nome, "Eixo / dimensão", "Docs"],
+                            [[getattr(r, categoria), r.Eixo, int(r.Documentos)] for r in dfp.itertuples()],
+                            [26, 120, 22])
+                pdf.ln(1)
+
+        _sub_pdf(pdf, "2.4 Sinais analíticos por dimensão (checagem de lacunas)")
+        total_ausentes = 0
+        total_sinais = 0
+        todas_dim = ac.sinais_todas_dimensoes(docs)
+        for eixo in ac.EIXOS_ANALISE:
+            s = todas_dim.get(eixo)
+            if s is None or s.empty:
+                continue
+            presentes = int((s["Situação"] == "Presente").sum())
+            ausentes_lista = s.loc[s["Situação"] == "Ausente", "Sinal"].tolist()
+            total_ausentes += len(ausentes_lista)
+            total_sinais += len(s)
+            texto = f"{eixo}: {presentes} sinais presentes de {len(s)}."
+            if ausentes_lista:
+                texto += " Ausentes: " + "; ".join(ausentes_lista[:10])
+                if len(ausentes_lista) > 10:
+                    texto += " …"
+            _linha_pdf(pdf, "  • " + texto, tamanho=9)
+        _linha_pdf(pdf, f"Total: {total_sinais} sinais analíticos, {total_ausentes} ausentes no recorte (lacunas).", tamanho=9)
+        pdf.ln(1)
+
+        _sub_pdf(pdf, "2.5 Tópicos latentes (LDA)")
+        lda = ac.lda_topicos(docs)
+        if lda:
+            for i, topo in enumerate(lda["topicos"], 1):
+                _linha_pdf(pdf, "  • Tópico " + str(i) + ": " + ", ".join(p for p, _ in topo[:8]), tamanho=9)
+        else:
+            _linha_pdf(pdf, "  — Corpus pequeno demais para LDA.", tamanho=9)
+    else:
+        _secao_pdf(pdf, "2. Análise textual do corpus filtrado")
+        _linha_pdf(pdf, "Nenhum documento corresponde aos filtros ativos.")
+
+    # 3. Conversa com o Chat RAG
+    _secao_pdf(pdf, "3. Conversa com o Chat RAG")
+    if not historico:
+        _linha_pdf(pdf, "Sem conversas registradas nesta sessão.")
     for msg in historico:
         role = "Pesquisador" if msg["role"] == "user" else f"IA ({msg.get('model', 'Assistente')})"
-        pdf.set_font("Arial", 'B', 12)
-        pdf.multi_cell(0, 10, txt=f"{role}:")
-        pdf.set_font("Arial", '', 11)
-        texto_limpo = msg["content"].encode('latin-1', 'ignore').decode('latin-1')
-        pdf.multi_cell(0, 8, txt=texto_limpo)
-        pdf.ln(5)
-    return pdf.output(dest='S').encode('latin-1')
+        pdf.set_font("Arial", "B", 11)
+        pdf.set_x(pdf.l_margin)
+        pdf.multi_cell(0, 7, text=_filtro_pdf(role) + ":")
+        pdf.set_font("Arial", "", 10)
+        pdf.set_x(pdf.l_margin)
+        pdf.multi_cell(0, 5.5, text=_filtro_pdf(msg["content"]))
+        pdf.ln(2)
+
+    return bytes(pdf.output(dest="S"))
 
 def inicializar_planilha_tese():
     if not os.path.exists(ARQUIVO_MATRIZ):
@@ -164,59 +345,10 @@ def inicializar_planilha_tese():
 # Cache hierárquico com validação por data de modificação
 @st.cache_data(ttl=3600, show_spinner="Carregando base de documentos...")
 def carregar_dados_hierarquicos_cache(pasta_raiz_str):
-    """Versão cacheada com verificação de atualização."""
-    pasta_raiz = Path(pasta_raiz_str)
-    if not pasta_raiz.exists(): return []
-    
-    # Verificar se cache é atualizado baseando-se na data mais recente
-    arquivos_pdf = list(pasta_raiz.rglob("*.pdf"))
-    if not arquivos_pdf: return []
-    
-    # Data de modificação mais recente entre todos os PDFs
-    mtime_max = max(f.stat().st_mtime for f in arquivos_pdf)
-    cache_key = f"{pasta_raiz.resolve()}|{mtime_max}"
-    
-    # Em Streamlit, o cache é invalidado automaticamente quando o parâmetro muda
-    # mas podemos adicionar lógica extra aqui se necessário
-    return _processar_pdfs_hierarquicos(pasta_raiz, arquivos_pdf)
-
-
-def _processar_pdfs_hierarquicos(pasta_raiz, arquivos_pdf):
-    """Função interna de processamento real."""
-    docs_com_metadados = []
-    regioes_validas = ["NORTE", "NORDESTE", "CENTRO-OESTE", "SUDESTE", "SUL", "BRASIL"]
-    
-    for caminho_pdf in arquivos_pdf:
-        try:
-            root = caminho_pdf.parent
-            file = caminho_pdf.name
-            partes = Path.normpath(root).parts
-            
-            regiao, uf, if_nome = "Outros", "S/D", "Não Identificado"
-            partes_upper = [p.upper() for p in partes]
-            
-            if "BRASIL" in partes_upper:
-                regiao, uf, if_nome = "Nacional", "BR", "Legislação Federal"
-            else:
-                for r in regioes_validas:
-                    if r in partes_upper:
-                        idx = partes_upper.index(r)
-                        regiao = partes[idx]
-                        if len(partes) > idx + 1: uf = partes[idx+1]
-                        if len(partes) > idx + 2: if_nome = partes[idx+2]
-                        break
-            
-            loader = PyPDFLoader(str(caminho_pdf))
-            paginas = loader.load()
-            ano = extrair_ano(file)
-            for p in paginas:
-                p.metadata.update({"regiao": regiao, "uf": uf, "instituto": if_nome, "ano": ano})
-            docs_com_metadados.extend(paginas)
-        except Exception as e:
-            # Em vez de return [], logar o erro e continuar
-            pass
-    
-    return docs_com_metadados
+    """Versão cacheada apoiada no corpus persistente (re-extração incremental por mtime)."""
+    if not os.path.exists(pasta_raiz_str):
+        return []
+    return ac.carregar_docs_paginas()
 
 
 @st.cache_resource(show_spinner="Indexando fragmentos...")
@@ -227,12 +359,12 @@ def get_cached_docs(pasta_raiz):
 # --- 3. MODELOS E RETRIEVER ---
 @st.cache_resource
 def carregar_llm(nome_modelo):
-    return ChatOllama(model=nome_modelo, temperature=0)
+    return ChatOllama(model=nome_modelo, temperature=0, num_predict=MAX_TOKENS_RESPOSTA)
 
+@st.cache_data(ttl=300)
 def obter_modelos_disponiveis():
-    """Lista modelos disponíveis no Ollama, com fallback para defaults."""
+    """Lista modelos de chat disponíveis no Ollama, com fallback para defaults."""
     try:
-        # Tentar listar modelos via subprocess
         result = subprocess.run(
             ["ollama", "list"], 
             capture_output=True, text=True, timeout=10
@@ -241,16 +373,26 @@ def obter_modelos_disponiveis():
             linhas = result.stdout.strip().split("\n")[1:]  # Pular header
             modelos = []
             for linha in linhas:
-                # Formato: "llama3    8B    q8_0    4.7 GB"
+                # Formato: "llama3:latest    8B    q8_0    4.7 GB"
                 partes = linha.split()
-                if partes:
-                    modelo_nome = partes[0].split(":")[0] if ":" in partes[0] else partes[0]
-                    modelos.append(modelo_nome)
-            return modelos if modelos else ["llama3", "phi3", "mistral"]
+                if not partes:
+                    continue
+                nome_completo = partes[0]
+                base = nome_completo.split(":")[0] if ":" in nome_completo else nome_completo
+                # Ignorar apenas modelos de embedding; manter todos os tags (ex.: qwen3:1.7b e qwen3:4b)
+                if base in MODELOS_EMBEDDING or nome_completo in modelos:
+                    continue
+                modelos.append(nome_completo)
+            # Ordenar: modelos recomendados primeiro, depois o restante alfabeticamente
+            prioridade = {m: i for i, m in enumerate(MODELOS_PRIORIDADE)}
+            def chave_ordem(nome):
+                return (prioridade.get(nome, 999), nome.lower())
+            modelos_ordenados = sorted(modelos, key=chave_ordem)
+            return modelos_ordenados if modelos_ordenados else MODELOS_FALLBACK
     except (FileNotFoundError, subprocess.TimeoutExpired, Exception):
         pass
     # Fallback para defaults conhecidos
-    return ["llama3", "phi3", "mistral", "gemma2"]
+    return MODELOS_FALLBACK
 
 @st.cache_resource
 def carregar_embeddings():
@@ -260,12 +402,15 @@ def carregar_embeddings():
 def configurar_retriever():
     if os.path.exists(DB_DIR):
         vectorstore = Chroma(persist_directory=DB_DIR, embedding_function=carregar_embeddings())
-        # Melhorar busca: k=4 para exibir, fetch_distance=1000 para candidatos maiores
-        retriever = vectorstore.as_retriever(
-            search_kwargs={"k": 4, "fetch_distance": 1000}
-        )
+        retriever = vectorstore.as_retriever(search_kwargs={"k": 4})
         return retriever
     return None
+
+def rotulo_modelo(nome_modelo):
+    """Retorna o nome do modelo com breve justificativa de uso (ex.: gemma3:4b (Multilíngue...))."""
+    base = nome_modelo.split(":")[0]
+    descricao = MODELOS_DESCRICAO.get(base)
+    return f"{nome_modelo} ({descricao})" if descricao else nome_modelo
 
 # --- 4. BARRA LATERAL ---
 inicializar_planilha_tese()
@@ -275,9 +420,9 @@ if "messages" not in st.session_state:
 with st.sidebar:
     st.header("🤖 Configurações de IA")
     modelos_disponiveis = obter_modelos_disponiveis()
-    opcoes_modelos = {m: m for m in modelos_disponiveis}
-    selecao_label = st.selectbox("Modelo Ativo:", list(opcoes_modelos.keys()))
-    llm = carregar_llm(opcoes_modelos[selecao_label])
+    indice_padrao = modelos_disponiveis.index(LLM_PADRAO) if LLM_PADRAO in modelos_disponiveis else 0
+    selecao_label = st.selectbox("Modelo Ativo:", modelos_disponiveis, index=indice_padrao, format_func=rotulo_modelo)
+    llm = carregar_llm(selecao_label)
     
     st.divider()
     st.subheader("📝 Diário de Bordo")
@@ -286,25 +431,29 @@ with st.sidebar:
     st.divider()
     st.header("🔍 Filtros de Analise")
     if os.path.exists(PASTA_BASE):
-        with st.spinner("Mapeando estrutura nacional..."):
-            todos_docs = carregar_dados_hierarquicos_cache(PASTA_BASE)
-        
-        ufs_disponiveis = sorted(list(set(d.metadata["uf"] for d in todos_docs)))
-        ifs_disponiveis = sorted(list(set(d.metadata["instituto"] for d in todos_docs)))
-        
+        ufs_disponiveis, ifs_disponiveis, _ = ac.resumo_estrutura()
+
         all_ufs = st.checkbox("Selecionar Todas UFs", value=False)
         filtro_uf = st.multiselect("Filtrar por UF:", ufs_disponiveis) if not all_ufs else ufs_disponiveis
         all_ifs = st.checkbox("Selecionar Todos IFs", value=False)
         filtro_if = st.multiselect("Filtrar por Instituto:", ifs_disponiveis) if not all_ifs else ifs_disponiveis
-        
+        incluir_federal = st.checkbox("Incluir Legislação Federal (leis e decretos base)", value=True)
+
         if st.button("🔄 Indexar/Atualizar Base"):
-            with st.spinner("Indexando fragmentos..."):
-                docs_filtrados = [d for d in todos_docs if (all_ufs or d.metadata["uf"] in filtro_uf) and (all_ifs or d.metadata["instituto"] in filtro_if)]
+            with st.spinner("Extraindo texto e indexando fragmentos..."):
+                def selecionar(d):
+                    return (all_ufs or not filtro_uf or d.metadata["uf"] in filtro_uf) and (
+                        (all_ifs or not filtro_if or d.metadata["instituto"] in filtro_if)
+                        or (incluir_federal and d.metadata.get("tipo") == "Legislação Federal"))
+                docs_filtrados = [d for d in carregar_dados_hierarquicos_cache(PASTA_BASE) if selecionar(d)]
                 splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150, separators=["\nArt. ", "\n§ ", "\nI - ", "\n\n", " "])
                 chunks = splitter.split_documents(docs_filtrados)
-                Chroma.from_documents(documents=chunks, embedding=carregar_embeddings(), persist_directory=DB_DIR)
-                st.cache_resource.clear()
-                st.success(f"Indexado com sucesso: {len(chunks)} trechos!")
+                if not chunks:
+                    st.warning("Nenhum documento selecionado para indexar. Marque UFs/IFs ou deixe os filtros vazios para indexar toda a base.")
+                else:
+                    Chroma.from_documents(documents=chunks, embedding=carregar_embeddings(), persist_directory=DB_DIR)
+                    st.cache_resource.clear()
+                    st.success(f"Indexado com sucesso: {len(chunks)} trechos!")
 
     st.divider()
     st.subheader("💾 Gestão")
@@ -312,8 +461,13 @@ with st.sidebar:
         nome_zip = realizar_backup()
         with open(nome_zip, "rb") as f:
             st.download_button("Baixar Backup", data=f, file_name=nome_zip)
+    st.download_button(
+        "📄 Exportar Relatório consolidado (PDF)",
+        data=gerar_pdf_consolidado(
+            st.session_state.messages,
+            st.session_state.get("_filtros_analise_atuais")),
+        file_name="relatorio_consolidado.pdf")
     if st.session_state.messages:
-        st.download_button("📄 Exportar PDF", data=gerar_pdf(st.session_state.messages), file_name="tese_analise.pdf")
         if st.button("🗑️ Limpar Chat"):
             st.session_state.messages = []; salvar_memoria_conversa([]); st.rerun()
 
@@ -321,55 +475,70 @@ with st.sidebar:
 st.title("🏛️ SocioInova RAG")
 st.caption(f"IA: {selecao_label} | Pesquisador: Jonatã França Bittencourt | Orientador: Prof. Leonardo Fernandes Nascimento")
 
-for message in st.session_state.messages:
-    with st.chat_message(message["role"]):
-        st.markdown(message["content"])
+aba_chat, aba_analise = st.tabs(["💬 Chat RAG", "📊 Análise Textual"])
 
-if prompt := st.chat_input("Inicie sua análise sociológica..."):
-    st.session_state.messages.append({"role": "user", "content": prompt})
-    with st.chat_message("user"): st.markdown(prompt)
+with aba_chat:
+    for message in st.session_state.messages:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
 
-    with st.chat_message("assistant"):
-        retriever = configurar_retriever()
-        if retriever:
-            prompt_doc = ChatPromptTemplate.from_template(
-                "Analise sociologicamente:\\nContexto: {context}\\nPergunta: {question}"
-            )
-            chain = ({"context": retriever, "question": RunnablePassthrough()} | prompt_doc | llm | StrOutputParser())
-            
-            with st.status(f"Processando com {selecao_label}...", expanded=False) as status:
-                try:
-                    docs_rec = retriever.invoke(prompt)
-                except Exception as e:
-                    st.error(f"Erro na recuperação de contexto: {str(e)[:200]}")
-                    docs_rec = []
-                status.update(label="Evidências localizadas. Redigindo...", state="running")
-                try:
-                    full_res = st.write_stream(chain.stream(prompt))
-                except Exception as e:
-                    st.warning("Erro na geração da resposta da IA")
-                    full_res = ""
-                status.update(label=f"Concluído por {selecao_label}", state="complete")
+    if prompt := st.chat_input("Inicie sua análise sociológica..."):
+        st.session_state.messages.append({"role": "user", "content": prompt})
+        with st.chat_message("user"): st.markdown(prompt)
 
-            if full_res:
-                salvar_no_log(prompt, full_res, selecao_label, objetivo=objetivo_sessao)
-                st.session_state.messages.append({"role": "assistant", "content": full_res, "model": selecao_label})
-                salvar_memoria_conversa(st.session_state.messages)
-            
-            with st.expander("🔍 Auditoria de Fontes"):
-                for d in docs_rec:
-                    st.write(f"**{d.metadata['instituto']}** ({d.metadata['uf']}, {d.metadata['ano']})")
-                    st.caption(d.page_content)
-                    st.divider()
+        with st.chat_message("assistant"):
+            retriever = configurar_retriever()
+            if retriever:
+                prompt_doc = ChatPromptTemplate.from_messages([
+                    ("system", DIRETRIZES_ANALITICAS),
+                    ("human", "Contexto recuperado dos documentos:\n{context}\n\nPergunta do pesquisador:\n{question}"),
+                ])
+                campos = {
+                    "context": retriever,
+                    "question": RunnablePassthrough(),
+                    "objetivo": lambda _: objetivo_sessao,
+                }
+                chain = (campos | prompt_doc | llm | StrOutputParser())
 
-            st.subheader("📥 Registrar na Matriz de Extração")
-            with st.form("extracao_dados", clear_on_submit=True):
-                c1, c2 = st.columns(2)
-                eixo = c1.selectbox("Eixo:", ["I. Governança", "II. Propriedade Intelectual", "III. Inovação Social", "IV. Capital Humano"])
-                variavel = c2.text_input("Variável:", placeholder="Ex: Royalties")
-                resumo = st.text_area("Achado Sociológico:", value=full_res[:500] + "...")
-                if st.form_submit_button("Confirmar Registro"):
-                    inst = docs_rec[0].metadata['instituto'] if docs_rec else "N/A"
-                    registrar_na_matriz(eixo, variavel, inst, resumo)
-                    st.success("Registrado na planilha CSV!")
-        else: st.warning("Indexe a base primeiro.")
+                with st.status(f"Processando com {selecao_label}...", expanded=False) as status:
+                    try:
+                        docs_rec = retriever.invoke(prompt)
+                    except Exception as e:
+                        st.error(f"Erro na recuperação de contexto: {str(e)[:200]}")
+                        docs_rec = []
+                    status.update(label="Evidências localizadas. Redigindo...", state="running")
+                    try:
+                        full_res = st.write_stream(chain.stream(prompt))
+                    except Exception as e:
+                        st.warning(f"Erro na geração da resposta da IA: {str(e)[:300]}")
+                        full_res = ""
+                    status.update(label=f"Concluído por {selecao_label}", state="complete")
+
+                if full_res:
+                    salvar_no_log(prompt, full_res, selecao_label, objetivo=objetivo_sessao)
+                    st.session_state.messages.append({"role": "assistant", "content": full_res, "model": selecao_label})
+                    salvar_memoria_conversa(st.session_state.messages)
+
+                with st.expander("🔍 Auditoria de Fontes"):
+                    for d in docs_rec:
+                        titulo = d.metadata.get("tipo") if d.metadata.get("tipo") == "Legislação Federal" else d.metadata['instituto']
+                        tipo_tag = f" | {d.metadata['tipo']}" if d.metadata.get("tipo") else ""
+                        st.write(f"**{titulo}** ({d.metadata['uf']}, {d.metadata['ano']}){tipo_tag}")
+                        st.caption(d.page_content)
+                        st.divider()
+
+                st.subheader("📥 Registrar na Matriz de Extração")
+                with st.form("extracao_dados", clear_on_submit=True):
+                    c1, c2 = st.columns(2)
+                    eixo = c1.selectbox("Eixo:", list(ac.EIXOS_ANALISE.keys()))
+                    variavel = c2.text_input("Variável:", placeholder="Ex: Royalties")
+                    resumo = st.text_area("Achado Sociológico:", value=full_res[:500] + "...")
+                    if st.form_submit_button("Confirmar Registro"):
+                        inst = docs_rec[0].metadata['instituto'] if docs_rec else "N/A"
+                        registrar_na_matriz(eixo, variavel, inst, resumo)
+                        st.success("Registrado na planilha CSV!")
+            else:
+                st.warning("Indexe a base primeiro.")
+
+with aba_analise:
+    analise_ui.render_aba(ac.resumo_estrutura())

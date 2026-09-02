@@ -14,3 +14,6 @@ data/vector_db/
 memoria_longo_prazo/chroma.sqlite3
 memoria_longo_prazo/**/*.bin
 memoria_longo_prazo/**/*.pickle
+
+# Cache de extração de corpus (local - recriável)
+corpus_cache.pkl

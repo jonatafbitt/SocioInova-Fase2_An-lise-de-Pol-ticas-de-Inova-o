@@ -13,9 +13,15 @@ echo [1/3] A verificar o Servidor Ollama...
 start /min ollama serve
 
 echo [2/3] A ativar o Ambiente Virtual Python...
-:: Ajuste o caminho abaixo se a sua pasta for diferente
-cd /d C:\Users\jonat\analise_ifs
-call venv_tese\Scripts\activate
+cd /d "%~dp0"
+if exist venv\Scripts\activate (
+    call venv\Scripts\activate
+) else (
+    echo Criando ambiente virtual...
+    python -m venv venv
+    call venv\Scripts\activate
+    pip install -r requirements.txt
+)
 
 echo [3/3] A iniciar a Interface Multi-Modelo...
 echo Aguarde... O navegador abrira automaticamente.

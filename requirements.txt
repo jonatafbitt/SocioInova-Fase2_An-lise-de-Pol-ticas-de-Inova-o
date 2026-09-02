@@ -2,6 +2,12 @@
 streamlit
 plotly
 
+# --- Análise Textual (nuvem, co-ocorrência, tópicos LDA) ---
+wordcloud
+matplotlib
+networkx
+scikit-learn
+
 # --- Dados e Processamento ---
 pandas
 pypdf

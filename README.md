@@ -15,6 +15,9 @@ O **Socioinova RAG** é uma ferramenta de pesquisa desenvolvida para análise so
 - **Backup automático**: Geração de `.zip` com base de dados, memórias e relatórios
 - **Chat RAG**: Interface conversacional com recuperação de contexto de documentos locais
 - **Análise decolonial**: Lente para identificar mimetismo vs. inovação situada nas políticas
+- **Aba "Análise Textual"**: Nuvem de palavras, mapa dinâmico de co-ocorrência de termos, tópicos LDA e frequência de temas (eixos da pesquisa), com filtros por UF/Instituto/Ano/Região
+- **Leitura de documentos**: Concordância KWIC (termo com contexto) e navegador de trechos por documento
+- **Startup acelerado**: Cache persistente de extração de PDFs com re-extração incremental (por data de modificação) — o corpus é extraído uma única vez e reutilizado
 
 ## 🛠️ Tecnologias Utilizadas
 
@@ -90,6 +93,29 @@ graph LR
     E --> F[Retriever (k=4)]
     F --> G[ChatOllama(model=selecionado)]
     G --> H[Resposta sociológica]
+```
+
+A extração de texto dos PDFs é feita pelo módulo `analise_corpus.py`, que mantém um
+cache persistente em `corpus_cache.pkl`: na primeira execução o texto é extraído uma vez;
+nas seguintes, apenas PDFs novos ou alterados (detectados por `mtime`) são reprocessados.
+As análises textuais (nuvem, co-ocorrência, LDA, KWIC) consomem esse corpus pré-processado.
+
+## 📁 Estrutura de Pastas
+
+```
+socioinova-rag/
+├── app.py                    # Interface Streamlit principal
+├── analise_corpus.py         # Cache de extração + NLP leve (stopwords, LDA, KWIC)
+├── analise_ui.py             # Renderização da aba "Análise Textual"
+├── iniciar_socioinova.bat    # Ativador de ambiente e interface
+├── requirements.txt          # Dependências Python
+├── .gitignore
+├── memoria_pesquisa.json
+├── registro_analise_tese.txt
+├── matriz_extracao_tese.csv
+├── config_rag.py
+├── documentos_inovação/      # 76 PDFs (BRASIL + 5 regiões, 42 IFs)
+└── memoria_longo_prazo/      # ChromaDB persistente
 ```
 
 ## 🤝 Contribuição
